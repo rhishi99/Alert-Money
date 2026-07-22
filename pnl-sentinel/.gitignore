@@ -1,0 +1,12 @@
+# Secrets — never commit real tokens
+.env
+
+# Runtime state
+*.db
+pnl_sentinel.db
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
