@@ -53,8 +53,27 @@ See [`docs/razorpay-phase2.md`] and [[razorpay-payment-links-phase2]].
 pick host, fill policy pages/legal. **Side task ≤24h:** update NxBagger with new Razorpay
 test key (old `rzp_test_T2Wm...` dies on grace).
 
+## 2026-07-23 — Phase 3 (multi-tenant BYO-broker) built + service manager
+Decisions: **AWS micro/nano + SQLite on-box** (reuse nxbagger AWS), **app-managed AES-256-GCM +
+SSM master key** (KMS/Postgres/Render rejected). See [[multitenant-encryption-phase3]].
+
+**Service manager:** `pnl-sentinel/stockpulse.ps1` + `start/stop/restart.bat` (ported from
+nxbagger.ps1) — sweeps stray bot.py/webhook before start (kills 409s), stop→zero. NOTE: local
+`.venv\Scripts\python.exe` is a REDIRECTOR stub → runs the worker as `C:\Python312\python.exe`
+(which has the deps); one start = stub+worker = one poller. Recreate venv for true isolation.
+
+**Phase 3a/3b/3c ALL built + tested (12 e2e pass), pushed:**
+- 3a: `crypto.py` (AES-256-GCM, --genkey, self-test), `storage.broker_conns`, `BrokerHub.for_user`.
+- 3b: `zerodha_auth.py` + `webhook.py /zerodha/callback` + `bot.py` Connect UI (Zerodha login /
+  Dhan paste) + `/connect` `/mypnl`; `requires_subscription` live on per-user cmds.
+- 3c: `bot.py monitor_tenants` fan-out (Semaphore 5) + `deploy/stockpulse/` (systemd+Caddy+SSM runbook).
+- Services running locally on new code; `/zerodha/callback` smoke-verified in-process.
+
+**Human TODO before live multi-tenant:** provision AWS instance + SSM `/stockpulse/*` secrets
+(deploy README); register Kite Redirect URL `https://<domain>/zerodha/callback`; register Razorpay
+webhook + paste `RAZORPAY_WEBHOOK_SECRET`. Also: update NxBagger with new Razorpay test key.
+
 ### Next session starts here
-- Phase 2 code done + green. Do the live tunnel smoke (docs/razorpay-phase2.md) when ready.
-- Phase 3: multi-tenant BYO-broker + KMS encryption + Postgres; apply `requires_subscription`
-  to real per-user data.
-- Bot runs locally as a long-poll daemon during dev (daemon still on OLD code — restart to pick up Phase 2).
+- Phase 3 is code-complete + green. Remaining is DEPLOY (infra provisioning) + the 3 human
+  registrations above. No app code blockers.
+- Bot+webhook run locally via `stockpulse.ps1` (session-bound when I start them; user runs start.bat).
