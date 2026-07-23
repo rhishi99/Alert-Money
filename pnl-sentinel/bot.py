@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 from functools import wraps
+from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -204,8 +205,26 @@ def kb_plans() -> InlineKeyboardMarkup:
 
 
 # ─────────────────────── commands ──────────────────────────
+def _onboarding_img(name: str) -> Path | None:
+    """Return the onboarding image path if it exists, else None (text-only fallback)."""
+    p = Path(settings.onboarding_img_dir) / name
+    return p if p.is_file() else None
+
+
+async def _send_banner(message) -> None:
+    """Send the hero banner above the menu when the image is present; never fatal."""
+    hero = _onboarding_img("hero.jpg")
+    if hero is None:
+        return
+    try:
+        await message.reply_photo(hero)
+    except Exception:  # noqa: BLE001 — a bad/missing image must not break onboarding
+        log.warning("hero banner send failed", exc_info=True)
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await store.mark_started(update.effective_user.id)
+    await _send_banner(update.message)
     await update.message.reply_text(TEXT_MAIN, reply_markup=kb_main(),
                                     parse_mode=ParseMode.MARKDOWN)
 

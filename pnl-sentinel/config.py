@@ -56,6 +56,7 @@ class Settings:
 
     plan_monthly_inr: int
     plan_yearly_inr: int
+    onboarding_img_dir: str
 
 
 def load_settings() -> Settings:
@@ -78,6 +79,7 @@ def load_settings() -> Settings:
         db_path=os.getenv("DB_PATH", "pnl_sentinel.db"),
         plan_monthly_inr=int(os.getenv("PLAN_MONTHLY_INR", "10")),
         plan_yearly_inr=int(os.getenv("PLAN_YEARLY_INR", "99")),
+        onboarding_img_dir=os.getenv("ONBOARDING_IMG_DIR", "../brand/onboarding"),
     )
 
     if s.enable_zerodha and not (s.kite_api_key and s.kite_access_token):
