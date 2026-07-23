@@ -8,7 +8,9 @@ import logging
 from functools import wraps
 from pathlib import Path
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update,
+)
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application, CallbackQueryHandler, CommandHandler, ContextTypes,
@@ -222,6 +224,36 @@ async def _send_banner(message) -> None:
         log.warning("hero banner send failed", exc_info=True)
 
 
+async def render_screen(context, q, text, kb, photo: Path | None = None) -> None:
+    """Render a callback screen, handling text<->photo message transitions.
+
+    Telegram can't edit a text message into a photo (or vice-versa), so when the
+    media type of the screen changes we delete the old message and send a new one.
+    Same media type = edit in place (keeps the smooth single-message feel).
+    """
+    msg = q.message
+    is_photo_msg = bool(msg.photo)
+    try:
+        if photo is not None:
+            if is_photo_msg:
+                await q.edit_message_media(
+                    InputMediaPhoto(photo, caption=text, parse_mode=ParseMode.MARKDOWN),
+                    reply_markup=kb)
+            else:
+                await msg.delete()
+                await context.bot.send_photo(msg.chat_id, photo, caption=text,
+                                             reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
+        else:
+            if is_photo_msg:
+                await msg.delete()
+                await context.bot.send_message(msg.chat_id, text, reply_markup=kb,
+                                               parse_mode=ParseMode.MARKDOWN)
+            else:
+                await q.edit_message_text(text, reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
+    except Exception:  # noqa: BLE001 — a render hiccup must not kill the handler
+        log.warning("render_screen failed for a screen transition", exc_info=True)
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await store.mark_started(update.effective_user.id)
     await _send_banner(update.message)
@@ -235,8 +267,13 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_plans(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(text_plans(), reply_markup=kb_plans(),
-                                    parse_mode=ParseMode.MARKDOWN)
+    img = _onboarding_img("plans.jpg")
+    if img is not None:
+        await update.message.reply_photo(img, caption=text_plans(),
+                                         reply_markup=kb_plans(), parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text(text_plans(), reply_markup=kb_plans(),
+                                        parse_mode=ParseMode.MARKDOWN)
 
 
 async def cmd_disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -261,24 +298,19 @@ async def on_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     await q.answer()
     if data == "nav:main":
-        await q.edit_message_text(TEXT_MAIN, reply_markup=kb_main(),
-                                  parse_mode=ParseMode.MARKDOWN)
+        await render_screen(context, q, TEXT_MAIN, kb_main())
     elif data == "nav:getstarted":
-        await q.edit_message_text(TEXT_GETSTARTED, reply_markup=kb_getstarted(),
-                                  parse_mode=ParseMode.MARKDOWN)
+        await render_screen(context, q, TEXT_GETSTARTED, kb_getstarted())
     elif data == "nav:plans":
-        await q.edit_message_text(text_plans(), reply_markup=kb_plans(),
-                                  parse_mode=ParseMode.MARKDOWN)
+        await render_screen(context, q, text_plans(), kb_plans(),
+                            _onboarding_img("plans.jpg"))
     elif data == "nav:howitworks":
-        await q.edit_message_text(TEXT_HOWITWORKS, reply_markup=kb_back(),
-                                  parse_mode=ParseMode.MARKDOWN)
+        await render_screen(context, q, TEXT_HOWITWORKS, kb_back())
     elif data == "nav:disclaimer":
-        await q.edit_message_text(TEXT_DISCLAIMER, reply_markup=kb_disclaimer(),
-                                  parse_mode=ParseMode.MARKDOWN)
+        await render_screen(context, q, TEXT_DISCLAIMER, kb_disclaimer())
     elif data == "nav:accept":
         await store.accept_tnc(update.effective_user.id)
-        await q.edit_message_text(TEXT_ACCEPTED, reply_markup=kb_back(),
-                                  parse_mode=ParseMode.MARKDOWN)
+        await render_screen(context, q, TEXT_ACCEPTED, kb_back())
 
 
 @owner_only
