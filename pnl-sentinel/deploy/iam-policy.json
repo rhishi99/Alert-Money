@@ -1,0 +1,28 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "ReadDhanSsmParams",
+            "Effect": "Allow",
+            "Action": [
+                "ssm:GetParameter",
+                "ssm:GetParameters"
+            ],
+            "Resource": [
+                "arn:aws:ssm:ap-south-1:*:parameter/nxbagger/DHAN_ACCESS_TOKEN",
+                "arn:aws:ssm:ap-south-1:*:parameter/nxbagger/DHAN_TOKEN_EXPIRY"
+            ]
+        },
+        {
+            "Sid": "DecryptSecureStringWithAwsManagedKey",
+            "Effect": "Allow",
+            "Action": "kms:Decrypt",
+            "Resource": "arn:aws:kms:ap-south-1:*:key/*",
+            "Condition": {
+                "StringEquals": {
+                    "kms:ViaService": "ssm.ap-south-1.amazonaws.com"
+                }
+            }
+        }
+    ]
+}

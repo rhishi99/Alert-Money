@@ -14,6 +14,29 @@ def _bool(key: str, default: str = "true") -> bool:
     return os.getenv(key, default).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def resolve_dhan_token(env: dict) -> str:
+    """Pure resolution: SSM (if configured) wins, else plain env var.
+
+    `env` is a mapping like os.environ — takes a dict so this is testable
+    without touching real env vars or the network.
+    """
+    param = env.get("DHAN_TOKEN_SSM_PARAM", "").strip()
+    if not param:
+        return env.get("DHAN_ACCESS_TOKEN", "")
+
+    region = env.get("AWS_REGION") or env.get("AWS_DEFAULT_REGION") or "ap-south-1"
+    region = env.get("DHAN_SSM_REGION", "").strip() or region
+    try:
+        import boto3  # lazy import — only needed when SSM is actually used
+        client = boto3.client("ssm", region_name=region)
+        resp = client.get_parameter(Name=param, WithDecryption=True)
+        return resp["Parameter"]["Value"]
+    except Exception as e:  # noqa: BLE001 — never let SSM take the bot down
+        print(f"WARN: failed to fetch Dhan token from SSM param {param!r} "
+              f"({e}); falling back to DHAN_ACCESS_TOKEN env var.")
+        return env.get("DHAN_ACCESS_TOKEN", "")
+
+
 @dataclass(frozen=True)
 class Settings:
     telegram_token: str
@@ -45,7 +68,7 @@ def load_settings() -> Settings:
         kite_api_secret=os.getenv("KITE_API_SECRET", ""),
         kite_access_token=os.getenv("KITE_ACCESS_TOKEN", ""),
         dhan_client_id=os.getenv("DHAN_CLIENT_ID", ""),
-        dhan_access_token=os.getenv("DHAN_ACCESS_TOKEN", ""),
+        dhan_access_token=resolve_dhan_token(os.environ),
         poll_interval=max(5, int(os.getenv("POLL_INTERVAL_SECONDS", "15"))),
         enable_zerodha=_bool("ENABLE_ZERODHA"),
         enable_dhan=_bool("ENABLE_DHAN"),
