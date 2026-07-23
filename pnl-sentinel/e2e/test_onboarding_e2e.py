@@ -20,8 +20,8 @@ from telethon.sessions import StringSession
 
 load_dotenv()
 
-API_ID = os.getenv("TG_TEST_API_ID", "")
-API_HASH = os.getenv("TG_TEST_API_HASH", "")
+API_ID = os.getenv("TG_TEST_API_ID") or os.getenv("API_ID", "")
+API_HASH = os.getenv("TG_TEST_API_HASH") or os.getenv("API_HASH", "")
 SESSION = os.getenv("TG_TEST_SESSION", "")
 BOT = os.getenv("BOT_USERNAME", "stockpulse_official_bot")
 

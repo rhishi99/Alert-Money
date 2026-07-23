@@ -20,8 +20,8 @@ from telethon.sessions import StringSession
 
 load_dotenv()
 
-api_id = os.getenv("TG_TEST_API_ID") or input("TG_TEST_API_ID: ").strip()
-api_hash = os.getenv("TG_TEST_API_HASH") or input("TG_TEST_API_HASH: ").strip()
+api_id = os.getenv("TG_TEST_API_ID") or os.getenv("API_ID") or input("API_ID: ").strip()
+api_hash = os.getenv("TG_TEST_API_HASH") or os.getenv("API_HASH") or input("API_HASH: ").strip()
 
 with TelegramClient(StringSession(), int(api_id), api_hash) as client:
     session = client.session.save()
