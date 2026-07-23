@@ -15,7 +15,6 @@
         },
         {
             "Sid": "DecryptSecureStringWithAwsManagedKey",
-            "Comment": "Only needed if the params use a customer-managed KMS key. The default SSM SecureString key (alias/aws/ssm) does not require an explicit grant for the instance role in most accounts — add/keep this statement if GetParameter fails with AccessDenied on decrypt.",
             "Effect": "Allow",
             "Action": "kms:Decrypt",
             "Resource": "arn:aws:kms:ap-south-1:*:key/*",

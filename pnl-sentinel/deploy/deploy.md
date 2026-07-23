@@ -21,6 +21,12 @@ Telegram needs no inbound ports, so the instance can be fully outbound-only.
    No AWS access keys are ever stored on the box — the role provides
    credentials automatically via the instance metadata service.
 
+> **KMS note:** the policy's second statement (`kms:Decrypt`) is only needed if
+> the SSM params use a **customer-managed** KMS key. The default SSM SecureString
+> key (`alias/aws/ssm`) needs no explicit grant in most accounts. Keep the
+> statement if `GetParameter` ever fails with `AccessDenied` on decrypt; drop it
+> otherwise.
+
 ## 3. Provision the box
 
 SSH in, then:
@@ -35,6 +41,12 @@ sudo bash /tmp/bootstrap/pnl-sentinel/deploy/setup.sh
 `/opt/pnl-sentinel`, creates the venv, installs `requirements.txt`, and
 installs+enables the systemd unit. It does **not** create `.env` — do that
 next.
+
+> **Private repo:** if `Alert-Money` is private, both `git clone` calls above
+> need auth. Simplest: create a **read-only deploy key** (an SSH key added to the
+> repo's Deploy Keys on GitHub) on the box and use the `git@github.com:...` SSH
+> URL — set `REPO_URL` accordingly (`export REPO_URL=git@github.com:rhishi99/Alert-Money.git`
+> before running `setup.sh`). A fine-grained PAT over HTTPS also works.
 
 ## 4. Create `.env`
 
