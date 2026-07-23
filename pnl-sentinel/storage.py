@@ -61,6 +61,23 @@ CREATE TABLE IF NOT EXISTS payments_log (
     ts               REAL NOT NULL
 );
 """
+# Multi-tenant broker connections: one row per (user, broker). enc_token is
+# ciphertext ONLY (encrypted by crypto.py before it reaches this table) —
+# never store plaintext tokens. `extra` holds non-secret JSON (e.g. dhan
+# client_id).
+_SCHEMA_BROKER_CONNS = """
+CREATE TABLE IF NOT EXISTS broker_conns (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_user_id  INTEGER NOT NULL,
+    broker            TEXT NOT NULL,
+    enc_token         BLOB NOT NULL,
+    extra             TEXT,
+    token_expiry      REAL,
+    status            TEXT NOT NULL DEFAULT 'active',
+    updated_at        REAL NOT NULL,
+    UNIQUE(telegram_user_id, broker)
+);
+"""
 
 
 def _now_iso() -> str:
@@ -96,6 +113,7 @@ class Store:
             await db.execute(_SCHEMA_ONBOARDING)
             await db.execute(_SCHEMA_SUBSCRIPTIONS)
             await db.execute(_SCHEMA_PAYMENTS_LOG)
+            await db.execute(_SCHEMA_BROKER_CONNS)
             await db.commit()
 
     async def get(self, chat_id: int) -> AlertConfig:
@@ -237,3 +255,59 @@ class Store:
         if sub is None or sub["current_period_end"] is None:
             return "none"
         return compute_status(sub["current_period_end"], grace_days, time.time())
+
+    # ─── broker connections ───
+    async def save_broker_conn(self, uid: int, broker: str, enc_token: bytes,
+                               extra: str | None = None,
+                               token_expiry: float | None = None) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                """INSERT INTO broker_conns
+                   (telegram_user_id, broker, enc_token, extra, token_expiry,
+                    status, updated_at)
+                   VALUES (?,?,?,?,?,'active',?)
+                   ON CONFLICT(telegram_user_id, broker) DO UPDATE SET
+                     enc_token=excluded.enc_token,
+                     extra=excluded.extra,
+                     token_expiry=excluded.token_expiry,
+                     status='active',
+                     updated_at=excluded.updated_at""",
+                (uid, broker, enc_token, extra, token_expiry, time.time()),
+            )
+            await db.commit()
+
+    async def get_broker_conns(self, uid: int) -> list[dict]:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM broker_conns WHERE telegram_user_id=? AND status='active'",
+                (uid,),
+            )
+            rows = await cur.fetchall()
+        return [dict(row) for row in rows]
+
+    async def delete_broker_conn(self, uid: int, broker: str) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "DELETE FROM broker_conns WHERE telegram_user_id=? AND broker=?",
+                (uid, broker),
+            )
+            await db.commit()
+
+    async def users_with_active_sub_and_brokers(self, grace_days: int) -> list[int]:
+        """Users with >=1 active broker connection AND a subscription whose
+        COMPUTED status is 'active' or 'grace'. Status rule lives only in
+        compute_status() — never reimplemented in SQL."""
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """SELECT DISTINCT b.telegram_user_id AS uid, s.current_period_end
+                   FROM broker_conns b
+                   JOIN subscriptions s ON s.telegram_user_id = b.telegram_user_id
+                   WHERE b.status='active' AND s.current_period_end IS NOT NULL"""
+            )
+            rows = await cur.fetchall()
+        now = time.time()
+        uids = {row["uid"] for row in rows
+                if compute_status(row["current_period_end"], grace_days, now) in ("active", "grace")}
+        return list(uids)

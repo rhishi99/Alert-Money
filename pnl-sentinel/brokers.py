@@ -176,6 +176,35 @@ class BrokerHub:
                 settings.dhan_client_id, settings.dhan_access_token,
                 token_provider=lambda: resolve_dhan_token(os.environ)))
 
+    @classmethod
+    async def for_user(cls, uid: int, store, settings) -> "BrokerHub":
+        """Build a hub from a user's OWN encrypted broker connections (Phase 3).
+
+        Decrypts each `enc_token` only here; the plaintext lives on the adapter
+        instance for this hub's lifetime and is never stored or logged. Zerodha
+        uses OUR global Kite app key + the user's access_token; Dhan uses the
+        user's own client_id (from `extra`) + token.
+        """
+        import json
+
+        from crypto import decrypt
+
+        hub = cls.__new__(cls)  # bypass __init__'s global-owner build
+        hub.brokers = []
+        for conn in await store.get_broker_conns(uid):
+            try:
+                token = decrypt(conn["enc_token"])
+            except Exception:  # noqa: BLE001 — a bad/rotated token must not kill the tick
+                log.warning("Could not decrypt %s token for a user — skipping", conn["broker"])
+                continue
+            extra = json.loads(conn["extra"]) if conn.get("extra") else {}
+            broker = conn["broker"]
+            if broker == "zerodha" and settings.kite_api_key:
+                hub.brokers.append(ZerodhaBroker(settings.kite_api_key, token))
+            elif broker == "dhan" and extra.get("client_id"):
+                hub.brokers.append(DhanBroker(extra["client_id"], token))
+        return hub
+
     async def snapshots(self) -> list[PnLSnapshot]:
         if not self.brokers:
             return []
