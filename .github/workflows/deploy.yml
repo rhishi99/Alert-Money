@@ -1,0 +1,308 @@
+name: deploy
+
+# Auto-deploy to AWS on every push to main: test -> build -> deploy.
+# See deploy/AWS_SETUP.md for the one-time AWS console setup this depends on.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+permissions:
+  id-token: write   # OIDC -> AWS, no long-lived keys
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: src/backend/requirements.txt
+
+      - name: Backend deps + pytest
+        working-directory: src/backend
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pytest -q
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: src/frontend/package-lock.json
+
+      - name: Frontend deps + vitest
+        working-directory: src/frontend
+        run: |
+          npm ci
+          npm run test -- --run
+
+  security:
+    # DevSecOps gate + vulnerability reporting, open-source scanners only.
+    # gitleaks (committed secrets) is a HARD gate. The SAST / dependency-CVE /
+    # IaC scanners run non-blocking and emit downloadable reports under the
+    # `security-reports` artifact, for review-and-fix.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # full history — gitleaks scans every commit
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - run: mkdir -p security-reports
+
+      # --- Secret scanning (gitleaks) — HARD GATE -------------------------
+      # continue-on-error so the other scanners + report upload still run;
+      # the gate is enforced in the final step below.
+      - name: Secret scan (gitleaks)
+        id: gitleaks
+        continue-on-error: true
+        run: |
+          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz \
+            | tar -xz gitleaks
+          ./gitleaks detect --source . --redact --report-format sarif \
+            --report-path security-reports/gitleaks.sarif --exit-code 1
+
+      # --- Dependency CVEs + IaC misconfig + secrets (Trivy) --------------
+      - name: Vulnerability + IaC scan (Trivy)
+        continue-on-error: true
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b .
+          ./trivy fs . --scanners vuln,misconfig,secret --severity HIGH,CRITICAL \
+            --format table --output security-reports/trivy.txt
+          ./trivy fs . --scanners vuln,misconfig,secret --severity HIGH,CRITICAL \
+            --format json --output security-reports/trivy.json
+
+      # --- Python SAST (Bandit) — insecure code patterns ------------------
+      - name: Python SAST (Bandit)
+        continue-on-error: true
+        run: |
+          pip install bandit
+          bandit -r src/backend -ll -f txt  -o security-reports/bandit.txt  || true
+          bandit -r src/backend -ll -f json -o security-reports/bandit.json || true
+
+      # --- Multi-language SAST (Semgrep) ----------------------------------
+      - name: SAST (Semgrep)
+        continue-on-error: true
+        run: |
+          pip install semgrep
+          semgrep scan --config p/security-audit --config p/secrets \
+            --text  --output security-reports/semgrep.txt   src || true
+          semgrep scan --config p/security-audit --config p/secrets \
+            --sarif --output security-reports/semgrep.sarif src || true
+
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: security-reports
+          path: security-reports/
+          retention-days: 30
+
+      - name: Enforce secret-scan gate
+        if: steps.gitleaks.outcome == 'failure'
+        run: |
+          echo "::error::gitleaks detected committed secrets — see the gitleaks.sarif report artifact"
+          exit 1
+
+  db-migrate:
+    # Applies pending Alembic migrations to Supabase (Postgres) before the app
+    # deploy. Analog of `dotnet ef database update` in a CI pipeline step:
+    # versioned migration files in git, applied by CI ahead of app code.
+    # Unconditional every run — `alembic upgrade head` is a no-op at head, same
+    # idempotent-by-default style as _ensure_indexes()'s CREATE INDEX IF NOT EXISTS.
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Alembic upgrade head (Supabase)
+        working-directory: src/backend
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          ALEMBIC_DATABASE_URL="${{ secrets.SUPABASE_DATABASE_URL }}" python -m alembic upgrade head
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: src/frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: src/frontend
+        env:
+          # Firebase web config — store as GitHub Actions Repository Variables
+          # (not Secrets; these are the public-facing Firebase SDK config values)
+          VITE_FIREBASE_API_KEY: ${{ vars.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ vars.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_STORAGE_BUCKET: ${{ vars.VITE_FIREBASE_STORAGE_BUCKET }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ vars.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+          VITE_FIREBASE_APP_ID: ${{ vars.VITE_FIREBASE_APP_ID }}
+        run: |
+          npm ci
+          npm run build
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-dist
+          path: src/frontend/dist
+          retention-days: 5
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [test, build, security, db-migrate]
+    steps:
+      - name: Download dist artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: frontend-dist
+          path: dist
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Upload build to S3
+        run: aws s3 sync dist "s3://${{ vars.DEPLOY_BUCKET }}/dist" --delete
+
+      # The instance is stopped outside 08:00-14:00 IST (instance-schedule.yml).
+      # SSM send-command requires the box running with the agent registered.
+      # We probe the agent with the SAME call the deploy step uses (a no-op
+      # send-command) rather than `describe-instance-information` PingStatus,
+      # because the inventory API lags real agent state by several minutes —
+      # past deploys failed here even though send-command + the app were live.
+      - name: Ensure instance running + SSM agent reachable
+        run: |
+          set -euo pipefail
+          INSTANCE="${{ vars.INSTANCE_ID }}"
+          STATE=$(aws ec2 describe-instances --instance-ids "$INSTANCE" \
+            --query "Reservations[0].Instances[0].State.Name" --output text)
+          echo "instance state: $STATE"
+          if [ "$STATE" != "running" ]; then
+            echo "starting instance..."
+            aws ec2 start-instances --instance-ids "$INSTANCE"
+            aws ec2 wait instance-running --instance-ids "$INSTANCE"
+          fi
+          echo "probing SSM agent via no-op send-command (5 min budget)..."
+          OK=""
+          for i in $(seq 1 30); do
+            PROBE_ID=$(aws ssm send-command \
+              --instance-ids "$INSTANCE" \
+              --document-name "AWS-RunShellScript" \
+              --comment "ssm-probe" \
+              --parameters 'commands=["echo ready"]' \
+              --query "Command.CommandId" --output text 2>/dev/null || echo "")
+            if [ -n "$PROBE_ID" ]; then
+              aws ssm wait command-executed \
+                --command-id "$PROBE_ID" --instance-id "$INSTANCE" \
+                >/dev/null 2>&1 || true
+              PROBE_STATUS=$(aws ssm get-command-invocation \
+                --command-id "$PROBE_ID" --instance-id "$INSTANCE" \
+                --query "Status" --output text 2>/dev/null || echo "")
+              echo "  attempt $i: status=$PROBE_STATUS"
+              if [ "$PROBE_STATUS" = "Success" ]; then OK=1; break; fi
+            else
+              echo "  attempt $i: send-command rejected (agent not registered)"
+            fi
+            sleep 10
+          done
+          if [ -z "$OK" ]; then
+            echo "::error::SSM agent did not accept commands within 5 min — aborting"
+            exit 1
+          fi
+
+      - name: Deploy on instance via SSM
+        run: |
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "${{ vars.INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --comment "deploy ${{ github.sha }}" \
+            --parameters '{"commands":[
+              "set -euo pipefail",
+              "sudo -u ec2-user git -C /opt/nxbagger fetch origin main",
+              "sudo -u ec2-user git -C /opt/nxbagger reset --hard origin/main",
+              "sudo -u ec2-user /opt/nxbagger/.venv/bin/pip install -q -r /opt/nxbagger/src/backend/requirements.txt",
+              "aws s3 sync s3://${{ vars.DEPLOY_BUCKET }}/dist /var/www/nxbagger --delete --exact-timestamps",
+              "systemctl restart nxbagger",
+              "nginx -s reload"
+            ]}' \
+            --query "Command.CommandId" --output text)
+          echo "SSM command: $CMD_ID"
+          aws ssm wait command-executed \
+            --command-id "$CMD_ID" \
+            --instance-id "${{ vars.INSTANCE_ID }}" || true
+          STATUS=$(aws ssm get-command-invocation \
+            --command-id "$CMD_ID" \
+            --instance-id "${{ vars.INSTANCE_ID }}" \
+            --query "Status" --output text)
+          echo "deploy status: $STATUS"
+          aws ssm get-command-invocation \
+            --command-id "$CMD_ID" \
+            --instance-id "${{ vars.INSTANCE_ID }}" \
+            --query "StandardOutputContent" --output text
+          test "$STATUS" = "Success"
+
+      # CloudFront caches /index.html and the hashed bundle list it references.
+      # Without this step, users keep loading the *previous* build's JS for up
+      # to 24 h after deploy — so new UI changes never appear. Requires the
+      # OIDC role to hold cloudfront:CreateInvalidation (see iam_github.tf).
+      - name: Invalidate CloudFront /index.html
+        if: ${{ vars.CLOUDFRONT_DISTRIBUTION_ID != '' }}
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}" \
+            --paths "/index.html" "/"
+
+      # Post-deploy healthcheck — proves the user-visible URL actually serves
+      # the new build, not just that SSM finished. Catches nginx/systemd/build
+      # regressions that "deploy: Success" would otherwise mask. Resolves the
+      # CloudFront domain from the distribution so we don't hardcode it.
+      - name: Healthcheck — CloudFront 200
+        if: ${{ vars.CLOUDFRONT_DISTRIBUTION_ID != '' }}
+        run: |
+          set -euo pipefail
+          DOMAIN=$(aws cloudfront get-distribution \
+            --id "${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}" \
+            --query "Distribution.DomainName" --output text)
+          echo "probing https://$DOMAIN/ ..."
+          for i in 1 2 3 4 5 6; do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://$DOMAIN/" || echo "000")
+            echo "  attempt $i: HTTP $CODE"
+            if [ "$CODE" = "200" ]; then exit 0; fi
+            sleep 10
+          done
+          echo "::error::Healthcheck failed — CloudFront did not return 200 after 60s"
+          exit 1

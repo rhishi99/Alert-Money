@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"systemMessage\": \"[CONTEXT WARNING] Approaching auto-compact threshold (~80% context used). Sprint state: review unsaved work, commit progress.\"}'"
+          }
+        ]
+      }
+    ]
+  }
+}

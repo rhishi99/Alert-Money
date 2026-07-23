@@ -1,0 +1,9 @@
+[mcp_servers.caveman-shrink]
+command = "npx"
+args = [
+    "-y",
+    "caveman-shrink",
+]
+
+[mcp_servers.supabase]
+url = "https://mcp.supabase.com/mcp?project_ref=ftscvtreqnbjhcziybmk"

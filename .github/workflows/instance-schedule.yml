@@ -1,0 +1,63 @@
+name: instance-schedule
+
+# Cost saver: the EC2 box is started at ~08:00 IST.
+# Stopping it is done on-demand (no compute charge when stopped; the Elastic IP 
+# stays attached so the address and CloudFront origin are unchanged). 
+# Cron times are UTC; IST = UTC+5:30.
+# Note: GitHub-hosted schedules can be delayed a few minutes — fine here.
+# Use the manual `workflow_dispatch` to start or stop the box.
+
+on:
+  #schedule:
+   # - cron: "30 2 * * *"   # 02:30 UTC = 08:00 IST — start
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "start or stop the instance"
+        required: true
+        default: "start"
+        type: choice
+        options: [start, stop]
+
+concurrency:
+  group: instance-schedule
+  cancel-in-progress: false
+
+permissions:
+  id-token: write   # OIDC -> AWS
+  contents: read
+
+jobs:
+  schedule:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve action
+        id: act
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "action=${{ inputs.action }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "action=start" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Start or stop the instance
+        run: |
+          set -euo pipefail
+          INSTANCE="${{ vars.INSTANCE_ID }}"
+          ACTION="${{ steps.act.outputs.action }}"
+          echo "action: $ACTION  instance: $INSTANCE"
+          if [ "$ACTION" = "start" ]; then
+            aws ec2 start-instances --instance-ids "$INSTANCE"
+            aws ec2 wait instance-running --instance-ids "$INSTANCE"
+            echo "instance running"
+          else
+            aws ec2 stop-instances --instance-ids "$INSTANCE"
+            aws ec2 wait instance-stopped --instance-ids "$INSTANCE"
+            echo "instance stopped"
+          fi

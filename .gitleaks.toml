@@ -1,0 +1,21 @@
+# NxBagger gitleaks configuration.
+#
+# Extends the default gitleaks ruleset (the deploy.yml security gate runs
+# `gitleaks detect` and treats any finding as a HARD failure). We only add a
+# narrowly-scoped allowlist for a vetted false positive so the gate stays
+# meaningful for real secrets.
+#
+# False positive: the generic-api-key rule fires on JSX object literals of the
+# form `key: 'qualifying_1m'` in src/frontend/src/pages/NewsCatalyst.jsx — the
+# `key:` token plus a quoted identifier looks like an API-key assignment. These
+# are compile-time presentational section identifiers, not secrets.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Vetted false positives — JSX `key:` section identifiers in UI pages (presentational constants, not secrets)."
+regexTarget = "line"
+regexes = [
+  '''key:\s*['"](holdings|qualifying_1m|major_market|trump_us|fno)['"]''',
+]

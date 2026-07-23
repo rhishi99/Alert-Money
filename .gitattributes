@@ -1,0 +1,13 @@
+# Normalize line endings to LF in the repo (autocrlf is off, repo is LF).
+# Stops Windows tools / agents (e.g. agy) from injecting CRLF diff noise.
+* text=auto eol=lf
+
+# Keep CRLF for Windows-only scripts that need it.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Bundled ~30MB Dhan security master. Prod + symbol_normalize.py need it tracked,
+# but a refresh produces a 130k-line diff. Treat as binary so git shows
+# "Binary files differ" instead — no more giant diffs in status/review.
+src/backend/security_id_list.csv -diff linguist-generated
