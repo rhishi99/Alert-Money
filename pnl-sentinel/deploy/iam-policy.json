@@ -2,6 +2,16 @@
     "Version": "2012-10-17",
     "Statement": [
         {
+            "Sid": "ReadStockpulseParams",
+            "Effect": "Allow",
+            "Action": [
+                "ssm:GetParameter",
+                "ssm:GetParameters",
+                "ssm:GetParametersByPath"
+            ],
+            "Resource": "arn:aws:ssm:ap-south-1:*:parameter/stockpulse/*"
+        },
+        {
             "Sid": "ReadDhanSsmParams",
             "Effect": "Allow",
             "Action": [
