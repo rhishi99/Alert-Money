@@ -56,7 +56,14 @@ class Settings:
 
     plan_monthly_inr: int
     plan_yearly_inr: int
+    plan_monthly_days: int
+    plan_yearly_days: int
+    subscription_grace_days: int
     onboarding_img_dir: str
+
+    razorpay_key_id: str
+    razorpay_key_secret: str
+    razorpay_webhook_secret: str
 
 
 def load_settings() -> Settings:
@@ -79,7 +86,13 @@ def load_settings() -> Settings:
         db_path=os.getenv("DB_PATH", "pnl_sentinel.db"),
         plan_monthly_inr=int(os.getenv("PLAN_MONTHLY_INR", "10")),
         plan_yearly_inr=int(os.getenv("PLAN_YEARLY_INR", "99")),
+        plan_monthly_days=int(os.getenv("PLAN_MONTHLY_DAYS", "30")),
+        plan_yearly_days=int(os.getenv("PLAN_YEARLY_DAYS", "365")),
+        subscription_grace_days=int(os.getenv("SUBSCRIPTION_GRACE_DAYS", "3")),
         onboarding_img_dir=os.getenv("ONBOARDING_IMG_DIR", "../brand/onboarding"),
+        razorpay_key_id=os.getenv("RAZORPAY_KEY_ID", ""),
+        razorpay_key_secret=os.getenv("RAZORPAY_KEY_SECRET", ""),
+        razorpay_webhook_secret=os.getenv("RAZORPAY_WEBHOOK_SECRET", ""),
     )
 
     if s.enable_zerodha and not (s.kite_api_key and s.kite_access_token):
@@ -88,6 +101,12 @@ def load_settings() -> Settings:
     if s.enable_dhan and not (s.dhan_client_id and s.dhan_access_token):
         print("WARN: Dhan enabled but DHAN_CLIENT_ID / DHAN_ACCESS_TOKEN missing "
               "— Dhan will be skipped.")
+    if not (s.razorpay_key_id and s.razorpay_key_secret):
+        print("WARN: RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET missing — payment links "
+              "will fail until set (see .env).")
+    if not s.razorpay_webhook_secret:
+        print("WARN: RAZORPAY_WEBHOOK_SECRET missing — the webhook will reject every "
+              "event until you register the webhook and paste its signing secret.")
     return s
 
 

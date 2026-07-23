@@ -37,9 +37,44 @@ CREATE TABLE IF NOT EXISTS onboarding (
 );
 """
 
+# Subscription state: one row per user. `current_period_end` is epoch seconds;
+# status is COMPUTED from it (+ grace) at read time, never stored stale.
+# No card/UPI/PII — only a Razorpay reference id.
+_SCHEMA_SUBSCRIPTIONS = """
+CREATE TABLE IF NOT EXISTS subscriptions (
+    telegram_user_id   INTEGER PRIMARY KEY,
+    plan               TEXT,
+    current_period_end REAL,
+    razorpay_ref       TEXT,
+    updated_at         REAL NOT NULL
+);
+"""
+
+# Webhook idempotency + audit: Razorpay retries the same event, so the event id
+# is the PK and INSERT OR IGNORE makes re-delivery a no-op. No card data.
+_SCHEMA_PAYMENTS_LOG = """
+CREATE TABLE IF NOT EXISTS payments_log (
+    event_id         TEXT PRIMARY KEY,
+    telegram_user_id INTEGER,
+    kind             TEXT,
+    amount_inr       INTEGER,
+    ts               REAL NOT NULL
+);
+"""
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def compute_status(period_end: float, grace_days: int, now: float) -> str:
+    """Pure subscription-status rule — no DB, so it's trivially testable.
+    active until period_end; grace for `grace_days` after; then expired."""
+    if now <= period_end:
+        return "active"
+    if now <= period_end + grace_days * 86400:
+        return "grace"
+    return "expired"
 
 
 @dataclass
@@ -59,6 +94,8 @@ class Store:
         async with aiosqlite.connect(self.path) as db:
             await db.execute(_SCHEMA)
             await db.execute(_SCHEMA_ONBOARDING)
+            await db.execute(_SCHEMA_SUBSCRIPTIONS)
+            await db.execute(_SCHEMA_PAYMENTS_LOG)
             await db.commit()
 
     async def get(self, chat_id: int) -> AlertConfig:
@@ -155,3 +192,48 @@ class Store:
             )
             row = await cur.fetchone()
         return row is not None and row[0] is not None
+
+    # ────────────────────── subscriptions ──────────────────────
+    async def record_payment_event(self, event_id: str, uid: int, kind: str,
+                                   amount_inr: int) -> bool:
+        """Log a webhook event idempotently. Returns True if freshly recorded,
+        False if this event_id was already seen (Razorpay re-delivery)."""
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "INSERT OR IGNORE INTO payments_log "
+                "(event_id, telegram_user_id, kind, amount_inr, ts) VALUES (?,?,?,?,?)",
+                (event_id, uid, kind, amount_inr, time.time()),
+            )
+            await db.commit()
+            return cur.rowcount == 1
+
+    async def activate_subscription(self, uid: int, plan: str,
+                                    period_end_epoch: float, razorpay_ref: str) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                """INSERT INTO subscriptions
+                   (telegram_user_id, plan, current_period_end, razorpay_ref, updated_at)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(telegram_user_id) DO UPDATE SET
+                     plan=excluded.plan,
+                     current_period_end=excluded.current_period_end,
+                     razorpay_ref=excluded.razorpay_ref,
+                     updated_at=excluded.updated_at""",
+                (uid, plan, period_end_epoch, razorpay_ref, time.time()),
+            )
+            await db.commit()
+
+    async def get_subscription(self, uid: int) -> dict | None:
+        async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                "SELECT * FROM subscriptions WHERE telegram_user_id=?", (uid,))
+            row = await cur.fetchone()
+        return dict(row) if row is not None else None
+
+    async def subscription_status(self, uid: int, grace_days: int) -> str:
+        """'active' | 'grace' | 'expired' | 'none' — computed from period_end."""
+        sub = await self.get_subscription(uid)
+        if sub is None or sub["current_period_end"] is None:
+            return "none"
+        return compute_status(sub["current_period_end"], grace_days, time.time())

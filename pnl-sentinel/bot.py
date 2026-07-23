@@ -19,6 +19,7 @@ from telegram.ext import (
 from alerts import AlertEngine
 from brokers import BrokerHub, PnLSnapshot
 from config import settings
+from razorpay_client import create_payment_link
 from storage import Store
 
 logging.basicConfig(
@@ -96,6 +97,31 @@ def owner_only(func):
                 await update.message.reply_text(OWNER_ONLY_MSG)
             return
         return await func(update, context)
+    return wrapper
+
+
+def requires_subscription(func):
+    """Gate a command on an active/grace subscription (owner always passes).
+
+    # ponytail: wired but NOT yet applied to the broker/PnL commands — those stay
+    # @owner_only until Phase 3 gives each user their own broker data to gate. A
+    # paid stranger today would only see the owner's PnL, which must never leak.
+    # Applied to real per-user data in Phase 3.
+    """
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if _update_is_owner(update):
+            return await func(update, context)
+        uid = update.effective_user.id if update.effective_user else 0
+        status = await store.subscription_status(uid, settings.subscription_grace_days)
+        if status in ("active", "grace"):
+            return await func(update, context)
+        msg = "🔒 This needs an active plan. Tap /plans to subscribe."
+        if update.callback_query:
+            await update.callback_query.answer(msg, show_alert=True)
+        elif update.message:
+            await update.message.reply_text(msg)
+        return
     return wrapper
 
 
@@ -291,14 +317,53 @@ async def cmd_howitworks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                                         parse_mode=ParseMode.MARKDOWN)
 
 
+async def cmd_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Public — report the caller's own subscription status."""
+    uid = update.effective_user.id
+    status = await store.subscription_status(uid, settings.subscription_grace_days)
+    if status == "none":
+        await update.message.reply_text(
+            "You don't have an active plan yet. Tap /plans to subscribe.")
+        return
+    sub = await store.get_subscription(uid)
+    from datetime import datetime, timezone
+    ends = datetime.fromtimestamp(sub["current_period_end"], timezone.utc).strftime("%d %b %Y")
+    icon = {"active": "✅", "grace": "⏳", "expired": "🔴"}[status]
+    line = {
+        "active": f"{icon} *Active* — {sub['plan']} plan, renews/expires *{ends}*.",
+        "grace": f"{icon} *Grace period* — your {sub['plan']} plan lapsed on {ends}. "
+                 "Renew via /plans to avoid losing access.",
+        "expired": f"{icon} *Expired* on {ends}. Tap /plans to resubscribe.",
+    }[status]
+    await update.message.reply_text(line, parse_mode=ParseMode.MARKDOWN)
+
+
 async def on_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Public — every button here is reachable from any chat, no owner check."""
     q = update.callback_query
     data = q.data
 
     if data in ("plan:monthly", "plan:yearly"):
-        await q.answer("💳 Payments launching soon — you'll subscribe right here.",
-                       show_alert=True)
+        plan = data.split(":", 1)[1]
+        amount = settings.plan_monthly_inr if plan == "monthly" else settings.plan_yearly_inr
+        try:
+            url = await create_payment_link(update.effective_user.id, plan)
+        except Exception:  # noqa: BLE001 — never leak Razorpay errors to the user
+            log.warning("payment link creation failed", exc_info=True)
+            await q.answer("⚠️ Couldn't start checkout — please try again in a moment.",
+                           show_alert=True)
+            return
+        await q.answer()  # answer once, on the success path
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"💳 Pay ₹{amount} — open checkout", url=url)],
+            [InlineKeyboardButton("⬅ Back", callback_data="nav:plans")],
+        ])
+        text = (f"💎 *{plan.capitalize()} plan — ₹{amount}*\n\n"
+                "Tap below to pay securely via Razorpay (UPI / card / netbanking). "
+                "Your plan activates automatically once payment succeeds.\n\n"
+                "_Payment is handled entirely by Razorpay — we never see your card "
+                "or UPI details._")
+        await render_screen(context, q, text, kb)
         return
 
     await q.answer()
@@ -425,6 +490,7 @@ async def post_init(app: Application) -> None:
     await app.bot.set_my_commands([
         BotCommand("start", "Welcome & menu"),
         BotCommand("plans", "View plans & pricing"),
+        BotCommand("subscription", "Check your plan status"),
         BotCommand("howitworks", "How StockPulse works"),
         BotCommand("disclaimer", "Disclaimer"),
         BotCommand("help", "Show the menu"),
@@ -449,6 +515,7 @@ def main() -> None:
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("disclaimer", cmd_disclaimer))
     app.add_handler(CommandHandler("howitworks", cmd_howitworks))
+    app.add_handler(CommandHandler("subscription", cmd_subscription))
     app.add_handler(CallbackQueryHandler(on_menu_callback))
 
     # Broker/PnL data — owner-only, guarded per-handler by @owner_only.
