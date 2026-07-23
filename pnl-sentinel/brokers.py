@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 log = logging.getLogger(__name__)
@@ -86,9 +87,24 @@ class ZerodhaBroker:
 class DhanBroker:
     name = "Dhan"
 
-    def __init__(self, client_id: str, access_token: str):
+    def __init__(self, client_id: str, access_token: str,
+                 token_provider: Callable[[], str] | None = None):
+        # token_provider re-resolves a fresh token (e.g. from SSM) so a mid-day
+        # token eviction (DH-906, when another app re-mints the shared Dhan
+        # session) can self-heal without restarting the bot.
+        self.client_id = client_id
+        self.token = access_token
+        self.token_provider = token_provider
+        self._build(access_token)
+
+    def _build(self, access_token: str) -> None:
         from dhanhq import dhanhq  # lazy import
-        self.dhan = dhanhq(client_id, access_token)
+        self.dhan = dhanhq(self.client_id, access_token)
+
+    @staticmethod
+    def _is_token_error(err: Exception) -> bool:
+        s = str(err).lower()
+        return "dh-906" in s or "invalid token" in s
 
     @staticmethod
     def _data(resp) -> list[dict]:
@@ -130,6 +146,16 @@ class DhanBroker:
         try:
             return await asyncio.to_thread(self._fetch)
         except Exception as e:  # noqa: BLE001
+            if self._is_token_error(e) and self.token_provider is not None:
+                try:
+                    fresh = await asyncio.to_thread(self.token_provider)
+                    if fresh and fresh != self.token:
+                        log.warning("Dhan token invalid — refreshed from source, retrying")
+                        self.token = fresh
+                        self._build(fresh)
+                        return await asyncio.to_thread(self._fetch)  # one retry
+                except Exception:  # noqa: BLE001
+                    log.exception("Dhan token refresh failed")
             log.exception("Dhan fetch failed")
             return PnLSnapshot(broker=self.name, ok=False, error=str(e))
 
@@ -139,11 +165,16 @@ class BrokerHub:
     """Owns all enabled brokers; fetches snapshots concurrently."""
 
     def __init__(self, settings):
+        import os
+        from config import resolve_dhan_token
+
         self.brokers = []
         if settings.enable_zerodha and settings.kite_api_key and settings.kite_access_token:
             self.brokers.append(ZerodhaBroker(settings.kite_api_key, settings.kite_access_token))
         if settings.enable_dhan and settings.dhan_client_id and settings.dhan_access_token:
-            self.brokers.append(DhanBroker(settings.dhan_client_id, settings.dhan_access_token))
+            self.brokers.append(DhanBroker(
+                settings.dhan_client_id, settings.dhan_access_token,
+                token_provider=lambda: resolve_dhan_token(os.environ)))
 
     async def snapshots(self) -> list[PnLSnapshot]:
         if not self.brokers:
