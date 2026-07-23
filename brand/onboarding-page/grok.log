@@ -1,0 +1,8 @@
+Internal error: {
+  "message": "API error (status 402 Payment Required): Grok Build usage balance exhausted\n\nRequest URL: https://cli-chat-proxy.grok.com/v1/responses",
+  "http_status": 402
+}
+Error: Internal error: {
+  "message": "API error (status 402 Payment Required): Grok Build usage balance exhausted\n\nRequest URL: https://cli-chat-proxy.grok.com/v1/responses",
+  "http_status": 402
+}

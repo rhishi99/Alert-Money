@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy — StockPulse</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <svg width="30" height="30" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+      <path d="M2 30 H12 L16 30 L20 16 L24 38 L28 24 H33" stroke="var(--brand)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+      <line x1="39" y1="8" x2="39" y2="40" stroke="var(--accent)" stroke-width="2"/>
+      <rect x="35" y="16" width="8" height="16" rx="2" fill="var(--accent)"/>
+    </svg>
+    <span class="name">StockPulse</span>
+  </header>
+
+  <div class="draft">⚠️ DRAFT — pending legal review. Placeholders in <span class="ph">highlight</span> must be completed before publishing.</div>
+
+  <h1>Privacy Policy</h1>
+  <p class="updated">Last updated: <span class="ph">[DATE]</span></p>
+
+  <p>This policy explains what data StockPulse, operated by
+  <span class="ph">[LEGAL ENTITY NAME]</span>, collects and how we handle it.</p>
+
+  <h2>What we collect</h2>
+  <ul>
+    <li><strong>Telegram identifier</strong> — your Telegram user/chat id, used to send you alerts and remember your settings.</li>
+    <li><strong>Your settings</strong> — alert thresholds and the timestamp you accepted these terms.</li>
+    <li><strong>Broker access tokens</strong> — when you connect a broker (Zerodha/Dhan), the access token needed to read your positions.</li>
+    <li><strong>Subscription status</strong> — a payment-processor reference id and whether your subscription is active. We do <strong>not</strong> collect or store card, UPI, or bank details.</li>
+  </ul>
+
+  <h2>How broker tokens are protected</h2>
+  <p>Broker access tokens are <strong>encrypted at rest</strong> (envelope
+  encryption via a managed key service). They are used only to fetch <em>your</em>
+  profit-and-loss and are never logged, displayed, sold, or shared. Tokens are
+  read-only where the broker supports it — StockPulse never places trades.
+  <span class="muted">Note: to compute your PnL, the running service decrypts your
+  token in memory at the moment of a broker call; we minimize this exposure but
+  cannot claim it is technically impossible for our operators to access.</span></p>
+
+  <h2>Payments</h2>
+  <p>Payments are processed by <strong>Razorpay</strong>. Your card/UPI/bank
+  details are entered on Razorpay and never pass through or get stored by us. We
+  store only a Razorpay reference id and your subscription status.</p>
+
+  <h2>Third parties we use</h2>
+  <ul>
+    <li><strong>Telegram</strong> — message delivery (subject to Telegram’s privacy policy).</li>
+    <li><strong>Razorpay</strong> — payment processing.</li>
+    <li><strong>Your broker</strong> (Zerodha/Dhan) — read your positions via their API.</li>
+    <li><strong>Cloud infrastructure</strong> — <span class="ph">[HOSTING/REGION]</span> for running the service and encrypted storage.</li>
+  </ul>
+  <p>We do not sell your data or share it for advertising.</p>
+
+  <h2>Retention &amp; deletion</h2>
+  <p>We keep your data while your account is active. You can disconnect a broker
+  (which deletes its stored token) or request deletion of your data at any time
+  via our <a href="contact.html">Contact</a> page; we delete it within a
+  reasonable period, except where retention is legally required.</p>
+
+  <h2>Your rights</h2>
+  <p>You may request access to, correction of, or deletion of your data. Contact
+  us using the details on our <a href="contact.html">Contact</a> page.</p>
+
+  <h2>Changes</h2>
+  <p>We may update this policy; material changes will be posted here.</p>
+
+  <footer>
+    <a href="index.html">Home</a><a href="terms.html">Terms</a>
+    <a href="privacy.html">Privacy</a><a href="refund.html">Refund</a>
+    <a href="contact.html">Contact</a>
+  </footer>
+</div>
+</body>
+</html>
