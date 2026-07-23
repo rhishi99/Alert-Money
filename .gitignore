@@ -12,6 +12,10 @@ venv/
 # Runtime state
 *.db
 
+# Telegram/Telethon session files (secrets)
+*.session
+*.session-journal
+
 # Junk
 *.stackdump
 .claude/settings.local.json

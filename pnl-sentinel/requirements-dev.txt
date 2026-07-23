@@ -1,0 +1,2 @@
+# Dev/test-only deps (not needed to run the bot).
+telethon==1.36.0
