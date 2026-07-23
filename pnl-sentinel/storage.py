@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import aiosqlite
 
@@ -25,6 +26,20 @@ CREATE TABLE IF NOT EXISTS alerts (
     updated_at        REAL NOT NULL
 );
 """
+
+# Onboarding: one row per Telegram user who has touched /start. No PII beyond
+# the Telegram user id.
+_SCHEMA_ONBOARDING = """
+CREATE TABLE IF NOT EXISTS onboarding (
+    telegram_user_id INTEGER PRIMARY KEY,
+    tnc_accepted_at   TEXT,
+    started_at        TEXT NOT NULL
+);
+"""
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 @dataclass
@@ -43,6 +58,7 @@ class Store:
     async def init(self) -> None:
         async with aiosqlite.connect(self.path) as db:
             await db.execute(_SCHEMA)
+            await db.execute(_SCHEMA_ONBOARDING)
             await db.commit()
 
     async def get(self, chat_id: int) -> AlertConfig:
@@ -109,3 +125,33 @@ class Store:
 
     async def reset_latches(self, chat_id: int) -> None:
         await self._upsert(chat_id, profit_triggered=0, loss_triggered=0)
+
+    # ─────────────────────── onboarding ────────────────────────
+    async def mark_started(self, uid: int) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO onboarding (telegram_user_id, started_at) "
+                "VALUES (?, ?)",
+                (uid, _now_iso()),
+            )
+            await db.commit()
+
+    async def accept_tnc(self, uid: int) -> None:
+        now = _now_iso()
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                """INSERT INTO onboarding (telegram_user_id, started_at, tnc_accepted_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(telegram_user_id) DO UPDATE SET
+                     tnc_accepted_at=excluded.tnc_accepted_at""",
+                (uid, now, now),
+            )
+            await db.commit()
+
+    async def has_accepted(self, uid: int) -> bool:
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT tnc_accepted_at FROM onboarding WHERE telegram_user_id=?", (uid,)
+            )
+            row = await cur.fetchone()
+        return row is not None and row[0] is not None

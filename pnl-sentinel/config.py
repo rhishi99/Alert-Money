@@ -54,6 +54,9 @@ class Settings:
     enable_dhan: bool
     db_path: str
 
+    plan_monthly_inr: int
+    plan_yearly_inr: int
+
 
 def load_settings() -> Settings:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -73,6 +76,8 @@ def load_settings() -> Settings:
         enable_zerodha=_bool("ENABLE_ZERODHA"),
         enable_dhan=_bool("ENABLE_DHAN"),
         db_path=os.getenv("DB_PATH", "pnl_sentinel.db"),
+        plan_monthly_inr=int(os.getenv("PLAN_MONTHLY_INR", "10")),
+        plan_yearly_inr=int(os.getenv("PLAN_YEARLY_INR", "99")),
     )
 
     if s.enable_zerodha and not (s.kite_api_key and s.kite_access_token):
