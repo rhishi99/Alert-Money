@@ -1,0 +1,7 @@
+# gitleaks configuration for pnl-sentinel.
+# Extends the default gitleaks ruleset so `gitleaks detect` treats any finding
+# (leaked Telegram/Kite/Dhan tokens, etc.) as a hard failure. Adapted from the
+# NxBagger security gate.
+
+[extend]
+useDefault = true
