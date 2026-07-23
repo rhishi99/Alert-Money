@@ -10,3 +10,6 @@ pnl_sentinel.db
 venv/
 __pycache__/
 *.pyc
+
+# Service-manager logs
+.logs/

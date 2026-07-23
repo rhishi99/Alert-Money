@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
-# StockPulse — start bot (long-poll) + Razorpay webhook in one shot.
-# Ctrl-C stops both. (Windows git-bash: venv python is under Scripts/.)
+# Sweep strays + start bot + webhook.
+# On Windows/git-bash delegate to stockpulse.ps1 (reliable process-tree kill);
+# on Linux fall back to pkill + backgrounded processes.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-PY=".venv/Scripts/python.exe"
-[ -x "$PY" ] || PY=".venv/bin/python"   # fall back to POSIX venv layout
+if command -v powershell.exe >/dev/null 2>&1; then
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "./stockpulse.ps1" start both
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "./stockpulse.ps1" status
+  exit 0
+fi
 
-echo "Starting StockPulse bot + webhook..."
-"$PY" bot.py &
-BOT=$!
-"$PY" -m uvicorn webhook:app --port 8000 &
-WEB=$!
-
-trap 'kill "$BOT" "$WEB" 2>/dev/null' EXIT INT TERM
-echo "Bot (pid $BOT) + webhook (pid $WEB) running. Webhook: http://localhost:8000"
-echo "Live Razorpay test: cloudflared tunnel --url http://localhost:8000"
-wait
+# --- Linux path ---
+PY=".venv/bin/python"; [ -x "$PY" ] || PY="python3"
+mkdir -p .logs
+pkill -f 'bot\.py' 2>/dev/null || true
+pkill -f 'uvicorn webhook:app' 2>/dev/null || true
+sleep 1
+nohup "$PY" bot.py > .logs/bot.log 2>&1 &
+nohup "$PY" -m uvicorn webhook:app --port 8000 > .logs/webhook.log 2>&1 &
+echo "bot + webhook started (logs in .logs/)."
