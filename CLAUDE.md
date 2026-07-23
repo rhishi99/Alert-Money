@@ -18,10 +18,11 @@ source — token discipline.
 ## Secrets — `pnl-sentinel/.env` (gitignored, never commit)
 - Borrowed from `NxBagger/src/backend/.env`. See `obsidian-memory/decisions/secrets-from-nxbagger.md`.
 - **Zerodha:** daily interactive token — `python generate_kite_token.py` each morning.
-- **Dhan:** single-session. Do NOT reinvent a minter. Reuse NxBagger's expert
-  `dhan_auth` (`src/backend/api/brokers/dhan_auth.py`): mint once via NxBagger's
-  venv, then copy the exact `DHAN_ACCESS_TOKEN` into `pnl-sentinel/.env` so both
-  apps share ONE token (same string = one Dhan session, no eviction war).
+- **Dhan:** single-session — **never mint from Alert-Money** (minting evicts the
+  live session, `DH-906`). READ the token from NxBagger's AWS SSM
+  (`/nxbagger/DHAN_ACCESS_TOKEN`, region `ap-south-1`, needs `MSYS_NO_PATHCONV=1`
+  in git-bash) into `pnl-sentinel/.env`. The AWS-deployed NxBagger is the sole
+  minter/publisher. See memory note `dhan-token-read-from-ssm`.
 
 ## Guardrails
 - This bot is read-only monitoring — never add order-placing code.
