@@ -9,7 +9,7 @@ from functools import wraps
 from pathlib import Path
 
 from telegram import (
-    InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update,
+    BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update,
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -282,8 +282,13 @@ async def cmd_disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def cmd_howitworks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(TEXT_HOWITWORKS, reply_markup=kb_back(),
-                                    parse_mode=ParseMode.MARKDOWN)
+    img = _onboarding_img("howitworks.jpg")
+    if img is not None:
+        await update.message.reply_photo(img, caption=TEXT_HOWITWORKS,
+                                         reply_markup=kb_back(), parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text(TEXT_HOWITWORKS, reply_markup=kb_back(),
+                                        parse_mode=ParseMode.MARKDOWN)
 
 
 async def on_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -305,7 +310,8 @@ async def on_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await render_screen(context, q, text_plans(), kb_plans(),
                             _onboarding_img("plans.jpg"))
     elif data == "nav:howitworks":
-        await render_screen(context, q, TEXT_HOWITWORKS, kb_back())
+        await render_screen(context, q, TEXT_HOWITWORKS, kb_back(),
+                            _onboarding_img("howitworks.jpg"))
     elif data == "nav:disclaimer":
         await render_screen(context, q, TEXT_DISCLAIMER, kb_disclaimer())
     elif data == "nav:accept":
@@ -415,6 +421,14 @@ async def monitor(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def post_init(app: Application) -> None:
     await store.init()
+    # Public command menu (owner-only data commands are intentionally hidden).
+    await app.bot.set_my_commands([
+        BotCommand("start", "Welcome & menu"),
+        BotCommand("plans", "View plans & pricing"),
+        BotCommand("howitworks", "How StockPulse works"),
+        BotCommand("disclaimer", "Disclaimer"),
+        BotCommand("help", "Show the menu"),
+    ])
     names = [b.name for b in hub.brokers] or ["none — check .env"]
     log.info("Brokers active: %s", ", ".join(names))
     try:
