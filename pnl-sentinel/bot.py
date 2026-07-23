@@ -4,7 +4,10 @@ Run:  python bot.py
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import secrets
 from functools import wraps
 from pathlib import Path
 
@@ -13,9 +16,12 @@ from telegram import (
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
-    Application, CallbackQueryHandler, CommandHandler, ContextTypes,
+    Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler,
+    filters,
 )
 
+import crypto
+import zerodha_auth
 from alerts import AlertEngine
 from brokers import BrokerHub, PnLSnapshot
 from config import settings
@@ -100,21 +106,25 @@ def owner_only(func):
     return wrapper
 
 
+async def _subscription_ok(update: Update) -> bool:
+    """Owner always passes; others need an active/grace plan. Shared by the
+    decorator and the inline connect-button checks."""
+    if _update_is_owner(update):
+        return True
+    uid = update.effective_user.id if update.effective_user else 0
+    return await store.subscription_status(uid, settings.subscription_grace_days) in ("active", "grace")
+
+
 def requires_subscription(func):
     """Gate a command on an active/grace subscription (owner always passes).
 
-    # ponytail: wired but NOT yet applied to the broker/PnL commands — those stay
-    # @owner_only until Phase 3 gives each user their own broker data to gate. A
-    # paid stranger today would only see the owner's PnL, which must never leak.
-    # Applied to real per-user data in Phase 3.
+    Phase 3: applied to per-user data commands (/mypnl, /setalert, connect flows)
+    — each subscriber acts only on their OWN broker data, so gating here never
+    exposes anyone else's PnL. Owner's global-broker commands stay @owner_only.
     """
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if _update_is_owner(update):
-            return await func(update, context)
-        uid = update.effective_user.id if update.effective_user else 0
-        status = await store.subscription_status(uid, settings.subscription_grace_days)
-        if status in ("active", "grace"):
+        if await _subscription_ok(update):
             return await func(update, context)
         msg = "🔒 This needs an active plan. Tap /plans to subscribe."
         if update.callback_query:
@@ -200,9 +210,28 @@ def kb_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🚀 Get Started", callback_data="nav:getstarted"),
          InlineKeyboardButton("💎 Plans", callback_data="nav:plans")],
+        [InlineKeyboardButton("🔌 Connect Broker", callback_data="nav:connect")],
         [InlineKeyboardButton("❓ How it works", callback_data="nav:howitworks"),
          InlineKeyboardButton("📜 Disclaimer", callback_data="nav:disclaimer")],
     ])
+
+
+def kb_connect() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🟢 Connect Zerodha", callback_data="connect:zerodha"),
+         InlineKeyboardButton("🔵 Connect Dhan", callback_data="connect:dhan")],
+        [InlineKeyboardButton("⬅ Back", callback_data="nav:main")],
+    ])
+
+
+TEXT_CONNECT = (
+    "🔌 *Connect Your Broker*\n\n"
+    "Link the account whose PnL you want watched. Your credentials are stored "
+    "*encrypted* — we only ever read your positions, never place orders.\n\n"
+    "• *Zerodha* — secure Kite login (you sign in on Zerodha's own page).\n"
+    "• *Dhan* — paste your client id + access token.\n\n"
+    "_Requires an active plan (/plans)._"
+)
 
 
 def kb_back() -> InlineKeyboardMarkup:
@@ -338,6 +367,52 @@ async def cmd_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.message.reply_text(line, parse_mode=ParseMode.MARKDOWN)
 
 
+async def cmd_connect(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Public — show the connect-broker menu (the actions themselves are gated)."""
+    await update.message.reply_text(TEXT_CONNECT, reply_markup=kb_connect(),
+                                    parse_mode=ParseMode.MARKDOWN)
+
+
+@requires_subscription
+async def cmd_mypnl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A subscriber's OWN combined PnL, from their own connected brokers."""
+    uid = update.effective_user.id
+    if not await store.get_broker_conns(uid):
+        await update.message.reply_text("No broker connected yet — tap /connect.")
+        return
+    msg = await update.message.reply_text("⏳ Fetching your PnL…")
+    user_hub = await BrokerHub.for_user(uid, store, settings)
+    snaps = await user_hub.snapshots()
+    cfg = await store.get(uid)
+    await msg.edit_text(render_status(snaps, cfg), parse_mode=ParseMode.MARKDOWN)
+
+
+async def on_dhan_paste(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Capture `client_id:token` after the user tapped Connect Dhan. The pasted
+    message holds a live token, so we delete it immediately and store ciphertext."""
+    if not context.user_data.get("awaiting_dhan"):
+        return  # not in the Dhan-capture state — ignore free text
+    context.user_data["awaiting_dhan"] = False
+    uid = update.effective_user.id
+    raw = (update.message.text or "").strip()
+    try:
+        await update.message.delete()  # scrub the secret from the chat
+    except Exception:  # noqa: BLE001
+        pass
+    client_id, _, token = raw.partition(":")
+    client_id, token = client_id.strip(), token.strip()
+    if not client_id or not token:
+        await context.bot.send_message(
+            uid, "⚠️ Format must be `client_id:token`. Tap /connect to retry.",
+            parse_mode=ParseMode.MARKDOWN)
+        return
+    await store.save_broker_conn(uid, "dhan", crypto.encrypt(token),
+                                 extra=json.dumps({"client_id": client_id}))
+    await context.bot.send_message(
+        uid, "✅ *Dhan connected!* Set a target with /setalert or check /mypnl.",
+        parse_mode=ParseMode.MARKDOWN)
+
+
 async def on_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Public — every button here is reachable from any chat, no owner check."""
     q = update.callback_query
@@ -366,6 +441,36 @@ async def on_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await render_screen(context, q, text, kb)
         return
 
+    if data in ("connect:zerodha", "connect:dhan"):
+        if not await _subscription_ok(update):
+            await q.answer("🔒 Connecting a broker needs an active plan. Tap /plans.",
+                           show_alert=True)
+            return
+        uid = update.effective_user.id
+        if data == "connect:zerodha":
+            state = secrets.token_urlsafe(24)
+            await store.save_pending_login(state, uid)
+            url = zerodha_auth.login_url(settings.kite_api_key, state)
+            await q.answer()
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🟢 Log in to Zerodha", url=url)],
+                [InlineKeyboardButton("⬅ Back", callback_data="nav:connect")],
+            ])
+            await render_screen(context, q,
+                                "🟢 *Connect Zerodha*\n\nTap below, sign in on Zerodha's "
+                                "own page, and you'll be redirected back automatically. "
+                                "I'll confirm here once you're connected.\n\n"
+                                "_Link valid for 15 minutes._", kb)
+        else:  # connect:dhan — capture via the next text message
+            context.user_data["awaiting_dhan"] = True
+            await q.answer()
+            await render_screen(context, q,
+                                "🔵 *Connect Dhan*\n\nSend your Dhan *client id* and "
+                                "*access token* in one message, as:\n\n`client_id:token`\n\n"
+                                "I'll delete your message right after reading it, and store "
+                                "the token encrypted.", kb_back())
+        return
+
     await q.answer()
     if data == "nav:main":
         await render_screen(context, q, TEXT_MAIN, kb_main())
@@ -377,6 +482,8 @@ async def on_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     elif data == "nav:howitworks":
         await render_screen(context, q, TEXT_HOWITWORKS, kb_back(),
                             _onboarding_img("howitworks.jpg"))
+    elif data == "nav:connect":
+        await render_screen(context, q, TEXT_CONNECT, kb_connect())
     elif data == "nav:disclaimer":
         await render_screen(context, q, TEXT_DISCLAIMER, kb_disclaimer())
     elif data == "nav:accept":
@@ -408,7 +515,7 @@ async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                         parse_mode=ParseMode.MARKDOWN)
 
 
-@owner_only
+@requires_subscription
 async def cmd_setalert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     usage = ("Usage:\n`/setalert profit 10000`\n`/setalert loss -5000`\n"
@@ -440,13 +547,13 @@ async def cmd_setalert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(usage, parse_mode=ParseMode.MARKDOWN)
 
 
-@owner_only
+@requires_subscription
 async def cmd_clearalerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await store.clear_thresholds(update.effective_chat.id)
     await update.message.reply_text("🧹 All alert thresholds cleared.")
 
 
-@owner_only
+@requires_subscription
 async def cmd_resetalerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await store.reset_latches(update.effective_chat.id)
     await update.message.reply_text("🔄 Alerts re-armed. They can fire again.")
@@ -484,6 +591,39 @@ async def monitor(context: ContextTypes.DEFAULT_TYPE) -> None:
         log.info("Fired %s alert at PnL %.2f", event.kind, total)
 
 
+async def _tick_one_user(context: ContextTypes.DEFAULT_TYPE, uid: int) -> None:
+    """Evaluate + alert for a single subscriber, from their own brokers."""
+    cfg = await store.get(uid)
+    if cfg.profit_threshold is None and cfg.loss_threshold is None:
+        return  # no threshold set — skip their broker calls entirely
+    user_hub = await BrokerHub.for_user(uid, store, settings)
+    ok_snaps = [s for s in await user_hub.snapshots() if s.ok]
+    if not ok_snaps:
+        return
+    total = BrokerHub.combined_total(ok_snaps)
+    for event in await engine.evaluate(uid, total):
+        await context.bot.send_message(uid, event.message, parse_mode=ParseMode.MARKDOWN)
+        log.info("Fired %s alert for user %s at PnL %.2f", event.kind, uid, total)
+
+
+async def monitor_tenants(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fan out one tick across subscribed users who have connected brokers.
+    Bounded concurrency so N users never becomes an API storm."""
+    uids = await store.users_with_active_sub_and_brokers(settings.subscription_grace_days)
+    if not uids:
+        return
+    sem = asyncio.Semaphore(5)  # ponytail: 5 concurrent users; raise if fan-out grows
+
+    async def guarded(uid: int) -> None:
+        async with sem:
+            try:
+                await _tick_one_user(context, uid)
+            except Exception:  # noqa: BLE001 — one user's failure must not stall the rest
+                log.warning("tenant tick failed for user %s", uid, exc_info=True)
+
+    await asyncio.gather(*(guarded(u) for u in uids))
+
+
 async def post_init(app: Application) -> None:
     await store.init()
     # Public command menu (owner-only data commands are intentionally hidden).
@@ -491,6 +631,9 @@ async def post_init(app: Application) -> None:
         BotCommand("start", "Welcome & menu"),
         BotCommand("plans", "View plans & pricing"),
         BotCommand("subscription", "Check your plan status"),
+        BotCommand("connect", "Connect your broker"),
+        BotCommand("mypnl", "Your live combined PnL"),
+        BotCommand("setalert", "Set a profit/loss target"),
         BotCommand("howitworks", "How StockPulse works"),
         BotCommand("disclaimer", "Disclaimer"),
         BotCommand("help", "Show the menu"),
@@ -516,17 +659,27 @@ def main() -> None:
     app.add_handler(CommandHandler("disclaimer", cmd_disclaimer))
     app.add_handler(CommandHandler("howitworks", cmd_howitworks))
     app.add_handler(CommandHandler("subscription", cmd_subscription))
+    app.add_handler(CommandHandler("connect", cmd_connect))
     app.add_handler(CallbackQueryHandler(on_menu_callback))
 
-    # Broker/PnL data — owner-only, guarded per-handler by @owner_only.
-    app.add_handler(CommandHandler("status", cmd_status))
-    app.add_handler(CommandHandler("positions", cmd_positions))
+    # Subscriber commands — self-service, gated by @requires_subscription on their
+    # OWN broker data (owner also passes the gate).
+    app.add_handler(CommandHandler("mypnl", cmd_mypnl))
     app.add_handler(CommandHandler("setalert", cmd_setalert))
     app.add_handler(CommandHandler("clearalerts", cmd_clearalerts))
     app.add_handler(CommandHandler("resetalerts", cmd_resetalerts))
+    # Free-text catcher for the Dhan client_id:token paste (Connect Dhan flow).
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_dhan_paste))
 
+    # Owner-only global-broker commands (owner's own .env tokens).
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("positions", cmd_positions))
+
+    # Owner monitor (global brokers) + per-subscriber fan-out (their own brokers).
     app.job_queue.run_repeating(monitor, interval=settings.poll_interval, first=5,
                                 name="pnl-monitor")
+    app.job_queue.run_repeating(monitor_tenants, interval=settings.poll_interval,
+                                first=8, name="pnl-monitor-tenants")
 
     log.info("Starting long-polling…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

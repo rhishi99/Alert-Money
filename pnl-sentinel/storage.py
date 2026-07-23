@@ -79,6 +79,17 @@ CREATE TABLE IF NOT EXISTS broker_conns (
 );
 """
 
+# Short-lived state for the Zerodha OAuth round-trip: maps an opaque `state`
+# nonce (carried through Kite's redirect_params) back to the Telegram user who
+# started the login. Consumed once, TTL-checked — never a long-lived secret.
+_SCHEMA_PENDING_ZERODHA = """
+CREATE TABLE IF NOT EXISTS pending_zerodha (
+    state             TEXT PRIMARY KEY,
+    telegram_user_id  INTEGER NOT NULL,
+    created_at        REAL NOT NULL
+);
+"""
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -114,6 +125,7 @@ class Store:
             await db.execute(_SCHEMA_SUBSCRIPTIONS)
             await db.execute(_SCHEMA_PAYMENTS_LOG)
             await db.execute(_SCHEMA_BROKER_CONNS)
+            await db.execute(_SCHEMA_PENDING_ZERODHA)
             await db.commit()
 
     async def get(self, chat_id: int) -> AlertConfig:
@@ -311,3 +323,30 @@ class Store:
         uids = {row["uid"] for row in rows
                 if compute_status(row["current_period_end"], grace_days, now) in ("active", "grace")}
         return list(uids)
+
+    # ─── zerodha OAuth pending state ───
+    async def save_pending_login(self, state: str, uid: int) -> None:
+        async with aiosqlite.connect(self.path) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO pending_zerodha (state, telegram_user_id, created_at) "
+                "VALUES (?,?,?)",
+                (state, uid, time.time()),
+            )
+            await db.commit()
+
+    async def pop_pending_login(self, state: str, ttl_sec: int = 900) -> int | None:
+        """Consume a pending login: return its uid and delete the row. Returns
+        None if unknown or older than ttl_sec (default 15 min)."""
+        if not state:
+            return None
+        async with aiosqlite.connect(self.path) as db:
+            cur = await db.execute(
+                "SELECT telegram_user_id, created_at FROM pending_zerodha WHERE state=?",
+                (state,),
+            )
+            row = await cur.fetchone()
+            await db.execute("DELETE FROM pending_zerodha WHERE state=?", (state,))
+            await db.commit()
+        if row is None or (time.time() - row[1]) > ttl_sec:
+            return None
+        return row[0]

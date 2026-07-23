@@ -1,0 +1,9 @@
+# StockPulse reverse proxy — Caddy auto-provisions Let's Encrypt TLS.
+#
+# Replace stockpulse.example.com with the real domain before deploying,
+# and point its DNS A-record at the instance's Elastic IP first
+# (Let's Encrypt HTTP-01 challenge requires DNS to already resolve).
+
+stockpulse.example.com {
+	reverse_proxy 127.0.0.1:8000
+}

@@ -11,6 +11,7 @@ HMAC-SHA256 over the RAW request body with RAZORPAY_WEBHOOK_SECRET.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -18,8 +19,12 @@ import logging
 import time
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI, Request, Response
+from fastapi.responses import HTMLResponse
 
+import crypto
+import zerodha_auth
 from config import settings
 from razorpay_client import PLANS
 from storage import Store
@@ -81,3 +86,47 @@ async def razorpay_webhook(request: Request) -> Response:
     await store.activate_subscription(uid, plan, period_end, entity.get("id", ""))
     log.info("Activated %s subscription for user %s (%d days)", plan, uid, days)
     return {"ok": True}
+
+
+async def _notify_user(uid: int, text: str) -> None:
+    """Best-effort Telegram ping from the webhook process (no bot instance here)."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            await c.post(
+                f"https://api.telegram.org/bot{settings.telegram_token}/sendMessage",
+                json={"chat_id": uid, "text": text, "parse_mode": "Markdown"},
+            )
+    except Exception:  # noqa: BLE001 — a failed ping must not fail the callback
+        log.warning("Telegram notify failed for user %s", uid)
+
+
+_DONE_HTML = ("<html><body style='font-family:sans-serif;text-align:center;margin-top:15%'>"
+              "<h2>{icon} {msg}</h2><p>You can close this tab and return to Telegram.</p>"
+              "</body></html>")
+
+
+@app.get("/zerodha/callback")
+async def zerodha_callback(request: Request) -> HTMLResponse:
+    """Kite redirects here after login. Map state->uid, exchange request_token
+    for an access_token, encrypt + store it. api_secret never leaves the server."""
+    qp = request.query_params
+    request_token = qp.get("request_token", "")
+    status = qp.get("status", "")
+    uid = await store.pop_pending_login(qp.get("state", ""))
+
+    if status != "success" or not request_token:
+        return HTMLResponse(_DONE_HTML.format(icon="⚠️", msg="Login cancelled or failed — retry from Telegram."))
+    if not uid:
+        return HTMLResponse(_DONE_HTML.format(icon="⏳", msg="This login link expired — start Connect again in Telegram."))
+    try:
+        access_token = await asyncio.to_thread(
+            zerodha_auth.exchange, settings.kite_api_key, settings.kite_api_secret, request_token)
+    except Exception:  # noqa: BLE001 — never leak Kite/SDK errors to the browser
+        log.warning("Zerodha token exchange failed for user %s", uid, exc_info=True)
+        return HTMLResponse(_DONE_HTML.format(icon="⚠️", msg="Could not complete Zerodha login — retry from Telegram."))
+
+    await store.save_broker_conn(uid, "zerodha", crypto.encrypt(access_token))
+    log.info("Zerodha connected for user %s", uid)
+    await _notify_user(uid, "✅ *Zerodha connected!* Your PnL is now being monitored. "
+                             "Set a target with /setalert, or check /mypnl.")
+    return HTMLResponse(_DONE_HTML.format(icon="✅", msg="Zerodha connected!"))
