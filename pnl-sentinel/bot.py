@@ -5,11 +5,12 @@ Run:  python bot.py
 from __future__ import annotations
 
 import logging
+from functools import wraps
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
-    Application, ApplicationHandlerStop, CommandHandler, ContextTypes, TypeHandler,
+    Application, CallbackQueryHandler, CommandHandler, ContextTypes,
 )
 
 from alerts import AlertEngine
@@ -60,31 +61,208 @@ def render_status(snaps: list[PnLSnapshot], cfg) -> str:
 
 
 # ─────────────────────── auth gate ─────────────────────────
-async def gatekeeper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Drop every update that is not from the owner chat."""
+# The bot is public: /start, /plans, /help, /disclaimer, /howitworks (and their
+# buttons) work for anyone. Broker/PnL data commands stay owner-only — guarded
+# per-handler below rather than a blanket gate, since public commands must
+# reach non-owner chats too.
+
+def is_owner(chat_id: int, owner_id: int) -> bool:
+    """Pure check — no Update object needed, so it's trivially testable."""
+    return chat_id == owner_id
+
+
+def _update_is_owner(update: Update) -> bool:
     chat = update.effective_chat
-    if chat is None or chat.id != settings.telegram_chat_id:
-        if chat:
-            log.warning("Rejected update from unauthorized chat %s", chat.id)
-        raise ApplicationHandlerStop
+    return chat is not None and is_owner(chat.id, settings.telegram_chat_id)
+
+
+OWNER_ONLY_MSG = "🔒 This is a personal command — per-user broker connect is coming soon."
+
+
+def owner_only(func):
+    """Guard a data command/callback: non-owners get a polite refusal, never data."""
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not _update_is_owner(update):
+            chat = update.effective_chat
+            if chat:
+                log.warning("Rejected data command from non-owner chat %s", chat.id)
+            if update.callback_query:
+                await update.callback_query.answer(OWNER_ONLY_MSG, show_alert=True)
+            elif update.message:
+                await update.message.reply_text(OWNER_ONLY_MSG)
+            return
+        return await func(update, context)
+    return wrapper
+
+
+# ───────────────────── onboarding screens ───────────────────
+# Public — reachable from any chat. Text + keyboard builders are shared by the
+# CommandHandlers (send a new message) and the CallbackQueryHandler (edit the
+# existing message in place), so the two navigation paths never drift apart.
+
+TEXT_MAIN = (
+    "👋 *Welcome to StockPulse!*\n\n"
+    "Real-time PnL alerts for your broker accounts — straight to Telegram, "
+    "the moment you hit your profit or loss target.\n\n"
+    "No more refreshing a terminal. Set a threshold, get on with your day, "
+    "get pinged when it matters.\n\n"
+    "What would you like to do?"
+)
+
+TEXT_GETSTARTED = (
+    "🚀 *Getting Started with StockPulse*\n\n"
+    "Here's how it works, in 3 steps:\n\n"
+    "1️⃣ *Connect your broker* — Zerodha or Dhan, securely.\n"
+    "2️⃣ *Set your alert* — a profit target, a loss limit, or both.\n"
+    "3️⃣ *Get pinged* — the moment your combined PnL crosses the line, "
+    "right here on Telegram.\n\n"
+    "That's it — no dashboards to babysit.\n\n"
+    "Before we go further, please take a moment to read our disclaimer 👇"
+)
+
+TEXT_DISCLAIMER = (
+    "⚠️ *Disclaimer (DRAFT — pending legal review)*\n\n"
+    "StockPulse is an *informational tool only*. Nothing here is investment "
+    "advice, and nothing should be treated as a recommendation to buy, sell, "
+    "or hold any security.\n\n"
+    "• We are *not SEBI-registered* investment advisors.\n"
+    "• Past performance is *no guarantee* of future results.\n"
+    "• PnL figures come from broker APIs and may lag or differ — *always "
+    "verify against your broker's own statements* before deciding anything.\n"
+    "• You use StockPulse entirely *at your own risk*.\n\n"
+    "By tapping \"I Understand\" below, you acknowledge you've read this."
+)
+
+TEXT_ACCEPTED = (
+    "✅ *Got it — thanks!*\n\n"
+    "You're all set to explore StockPulse. Broker connect and live alerts "
+    "are coming very soon."
+)
+
+TEXT_HOWITWORKS = (
+    "❓ *How StockPulse Works*\n\n"
+    "```\n"
+    "🔌 Connect Broker\n"
+    "      ↓\n"
+    "🎯 Set Alert Threshold\n"
+    "      ↓\n"
+    "📡 We Monitor Continuously\n"
+    "      ↓\n"
+    "🔔 Telegram Ping The Moment You Hit It\n"
+    "```\n"
+    "• Works across Zerodha & Dhan (more brokers coming)\n"
+    "• Combined PnL across all your connected accounts\n"
+    "• Alerts latch — one ping per breach, never spam"
+)
+
+
+def text_plans() -> str:
+    return (
+        "💎 *StockPulse Plans*\n\n"
+        "Choose what works for you:\n\n"
+        f"• *Monthly* — ₹{settings.plan_monthly_inr}/month\n"
+        f"• *Yearly* — ₹{settings.plan_yearly_inr}/year (best value)\n\n"
+        "Tap a plan to subscribe."
+    )
+
+
+def kb_main() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚀 Get Started", callback_data="nav:getstarted"),
+         InlineKeyboardButton("💎 Plans", callback_data="nav:plans")],
+        [InlineKeyboardButton("❓ How it works", callback_data="nav:howitworks"),
+         InlineKeyboardButton("📜 Disclaimer", callback_data="nav:disclaimer")],
+    ])
+
+
+def kb_back() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data="nav:main")]])
+
+
+def kb_getstarted() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📜 Read Disclaimer", callback_data="nav:disclaimer"),
+         InlineKeyboardButton("✅ I Understand", callback_data="nav:accept")],
+        [InlineKeyboardButton("⬅ Back", callback_data="nav:main")],
+    ])
+
+
+def kb_disclaimer() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ I Understand", callback_data="nav:accept")],
+        [InlineKeyboardButton("⬅ Back", callback_data="nav:main")],
+    ])
+
+
+def kb_plans() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"₹{settings.plan_monthly_inr}/month", callback_data="plan:monthly"),
+         InlineKeyboardButton(f"₹{settings.plan_yearly_inr}/year", callback_data="plan:yearly")],
+        [InlineKeyboardButton("⬅ Back", callback_data="nav:main")],
+    ])
 
 
 # ─────────────────────── commands ──────────────────────────
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "👋 *PnL Sentinel online.*\n\n"
-        "Commands:\n"
-        "/status — live PnL across brokers\n"
-        "/positions — per-instrument breakdown\n"
-        "/setalert profit 10000 — alert when combined PnL ≥ +10,000\n"
-        "/setalert loss -5000 — alert when combined PnL ≤ −5,000\n"
-        "/clearalerts — remove both thresholds\n"
-        "/resetalerts — re-arm fired alerts\n"
-        f"\nMonitoring every {settings.poll_interval}s during the trading day.",
-        parse_mode=ParseMode.MARKDOWN,
-    )
+    await store.mark_started(update.effective_user.id)
+    await update.message.reply_text(TEXT_MAIN, reply_markup=kb_main(),
+                                    parse_mode=ParseMode.MARKDOWN)
 
 
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(TEXT_MAIN, reply_markup=kb_main(),
+                                    parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_plans(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(text_plans(), reply_markup=kb_plans(),
+                                    parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_disclaimer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(TEXT_DISCLAIMER, reply_markup=kb_disclaimer(),
+                                    parse_mode=ParseMode.MARKDOWN)
+
+
+async def cmd_howitworks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(TEXT_HOWITWORKS, reply_markup=kb_back(),
+                                    parse_mode=ParseMode.MARKDOWN)
+
+
+async def on_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Public — every button here is reachable from any chat, no owner check."""
+    q = update.callback_query
+    data = q.data
+
+    if data in ("plan:monthly", "plan:yearly"):
+        await q.answer("💳 Payments launching soon — you'll subscribe right here.",
+                       show_alert=True)
+        return
+
+    await q.answer()
+    if data == "nav:main":
+        await q.edit_message_text(TEXT_MAIN, reply_markup=kb_main(),
+                                  parse_mode=ParseMode.MARKDOWN)
+    elif data == "nav:getstarted":
+        await q.edit_message_text(TEXT_GETSTARTED, reply_markup=kb_getstarted(),
+                                  parse_mode=ParseMode.MARKDOWN)
+    elif data == "nav:plans":
+        await q.edit_message_text(text_plans(), reply_markup=kb_plans(),
+                                  parse_mode=ParseMode.MARKDOWN)
+    elif data == "nav:howitworks":
+        await q.edit_message_text(TEXT_HOWITWORKS, reply_markup=kb_back(),
+                                  parse_mode=ParseMode.MARKDOWN)
+    elif data == "nav:disclaimer":
+        await q.edit_message_text(TEXT_DISCLAIMER, reply_markup=kb_disclaimer(),
+                                  parse_mode=ParseMode.MARKDOWN)
+    elif data == "nav:accept":
+        await store.accept_tnc(update.effective_user.id)
+        await q.edit_message_text(TEXT_ACCEPTED, reply_markup=kb_back(),
+                                  parse_mode=ParseMode.MARKDOWN)
+
+
+@owner_only
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = await update.message.reply_text("⏳ Fetching PnL…")
     snaps = await hub.snapshots()
@@ -92,6 +270,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await msg.edit_text(render_status(snaps, cfg), parse_mode=ParseMode.MARKDOWN)
 
 
+@owner_only
 async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = await update.message.reply_text("⏳ Fetching positions…")
     snaps = await hub.snapshots()
@@ -107,6 +286,7 @@ async def cmd_positions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                         parse_mode=ParseMode.MARKDOWN)
 
 
+@owner_only
 async def cmd_setalert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     usage = ("Usage:\n`/setalert profit 10000`\n`/setalert loss -5000`\n"
@@ -138,11 +318,13 @@ async def cmd_setalert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text(usage, parse_mode=ParseMode.MARKDOWN)
 
 
+@owner_only
 async def cmd_clearalerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await store.clear_thresholds(update.effective_chat.id)
     await update.message.reply_text("🧹 All alert thresholds cleared.")
 
 
+@owner_only
 async def cmd_resetalerts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await store.reset_latches(update.effective_chat.id)
     await update.message.reply_text("🔄 Alerts re-armed. They can fire again.")
@@ -196,8 +378,15 @@ async def post_init(app: Application) -> None:
 def main() -> None:
     app = Application.builder().token(settings.telegram_token).post_init(post_init).build()
 
-    app.add_handler(TypeHandler(Update, gatekeeper), group=-1)  # auth first
+    # Public onboarding — any chat.
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("plans", cmd_plans))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("disclaimer", cmd_disclaimer))
+    app.add_handler(CommandHandler("howitworks", cmd_howitworks))
+    app.add_handler(CallbackQueryHandler(on_menu_callback))
+
+    # Broker/PnL data — owner-only, guarded per-handler by @owner_only.
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("positions", cmd_positions))
     app.add_handler(CommandHandler("setalert", cmd_setalert))
