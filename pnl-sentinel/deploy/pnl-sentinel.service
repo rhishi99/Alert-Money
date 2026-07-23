@@ -1,0 +1,17 @@
+[Unit]
+Description=PnL Sentinel Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+# Confirm these paths match where setup.sh cloned the repo.
+WorkingDirectory=/opt/pnl-sentinel/pnl-sentinel
+EnvironmentFile=/opt/pnl-sentinel/pnl-sentinel/.env
+ExecStart=/opt/pnl-sentinel/pnl-sentinel/.venv/bin/python bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
